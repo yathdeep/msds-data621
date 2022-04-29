@@ -1,0 +1,597 @@
+---
+title: 'Homework #4: Insurance'
+author: "Deepak sharma"
+date: "4/28/2022"
+output:
+  pdf_document: default
+  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+```
+
+### Management summary
+
+This project is based on a dataset from an auto insurance company's customers. It builds two predictive models that estimate a) the probability that a customer would have a car accident and b) the monetary amount of insurance claims in case of the accident.  
+After an initial variable inspection, three logistic regression models, and two multiple linear regression models were prepared and compared on test data.  
+Based on classification performance metrics, the best model is suggested and applied on the evaluation dataset.
+
+### 1. DATA EXPLORATION 
+
+The training dataset contains 8161 observations of 26 variables (one index, two response, and 23 predictor variables).  
+Each record (row) represents a set of attributes of an insurance company individual customer that are related to their socio-demographic profile and the insured vehicle.
+The binary response variable `TARGET_FLAG` has 1 if the customer's car was in a crash, and 0 if not.
+The continous response variable `TARGET_AMT` defines the cost related to the car crash if it happened.
+  
+
+
+
+```{r message=FALSE}
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(caret)
+library(DataExplorer)
+library(AppliedPredictiveModeling)
+library(vcd)
+df_raw_train = read.csv("insurance_training_data.csv") 
+```
+
+#### 1.1. Univariate analysis
+
+```{r}
+# Preprocess the variables into numerics / factors as necessary
+dollars_to_numeric = function(input) {
+  out = sub("\\$", "", input)
+  out = as.numeric(sub(",", "", out))
+  return(out)
+}
+# Replace spaces with underscores
+space_to_underscore = function(input) {
+  out = sub(" ", "_", input)
+  return(out)
+}
+df = as.tbl(df_raw_train) %>% 
+  mutate_at(c("INCOME","HOME_VAL","BLUEBOOK","OLDCLAIM"),
+            dollars_to_numeric) %>% 
+  mutate_at(c("EDUCATION","JOB","CAR_TYPE","URBANICITY"),
+            space_to_underscore) %>% 
+  mutate_at(c("EDUCATION","JOB","CAR_TYPE","URBANICITY"),
+            as.factor) %>% 
+  mutate(TARGET_FLAG = as.factor(TARGET_FLAG))
+```
+
+
+Summaries for the individual variables (after some cleaning) are provided below.  
+```{r}
+summary(df)
+```
+
+```{r}
+plot_missing(df, title = "Percentage of missing data per variable")
+```
+
+
+From the summaries and the chart above we can see that multiple variables have missing data, but the amount of NAs is not very high. 
+  
+Frequency counts of class occurrence for the descrete variables are provided below
+
+```{r}
+# Drop the index column
+df = df %>% select(-INDEX)
+df_viz = split_columns(data = df)
+```
+
+```{r}
+## View distribution of all discrete variables
+plot_bar(df_viz$discrete, title = "Frequency counts for discrete variables")
+```
+  
+Histograms of the distributions of the remaining continuous variables are provided below
+
+```{r}
+## View distribution of all continuous variables
+#plot_histogram(df_viz$continuous, "Histograms of continous variables")
+```
+  
+We can see that - as expected based on the description above - the values of the variables are non-negative. This means that we should assume a gamma distribution as the generating function, which impacts the choice of regression models later on. In addition, 
+the variables `KIDSDRIV`, `HOMEKIDS`, `OLDCLAIM`, and `HOMEVAL` have a significant share of observations that are equal to zero and do not match the rest of the distribution of the data. 
+  
+A check for near-zero variance did not show a positive result for any variable.
+
+```{r,eval=FALSE, include=F}
+# Check for NZV
+nzv = nearZeroVar(df, saveMetrics= TRUE)
+nzv
+```
+
+  
+#### 1.2. Bivariate analysis
+  
+The pairwise correlations between the continuous variables are displayed below
+
+```{r}
+## View correlation of all continuous varaibles (for complete cases)
+plot_correlation(df_viz$continuous[complete.cases(df_viz$continuous),],
+                 type = "continuous",title = "Pairwise correlations between continuous variables")
+```
+
+  
+This analysis shows generally weak correlations between the continous predictors and the continous response, as well as between individual predictors. However, several predictors do show moderately strong relationships:
+  
+- The variables describing various aspects of income are positively correlated with each other and with age and years in the same job: `INCOME`, `HOME_VAL` (home value), `BLUEBOOK` (car value), `AGE`, `YOJ` (years in the same job)  
+- `HOMEKIDS` (the number of children at home ) is negatively linked with age, income, and age of the car  
+- `CLM_FREQ` (claim frequency in the past 5 years), as well as `OLDCLAIM` (the total claimed amount), and `MVR-PTS` (the number of Motor Vehicle Recors Points) are weakly positively linked with `TARGET_AMT` (the payout in case the car was in a crash)
+
+These relationships and their connection to the target class are inspected in scatter plots provided in the appendix.
+  
+
+  
+**Pairwise relationship with the binary target variable**
+  
+First we inspect the relationship between the binary outcome `TARGET_FLAG` and the continous predictors using boxplots.  
+  
+```{r}
+## View continuous distribution based on the target levels
+plot_boxplot(df, "TARGET_FLAG")
+```
+  
+Analyzing the boxplots we can see that while there is some variance in the location of the medians per level of the target variable, none of the predictors by itself appears to be particularly informative for the target. This confirms the finding on weak correlations with the continous target variable discussed above.
+  
+Moving to discrete predictors, we can inspect the relative frequencies of occurrence of each factor level in conjunction with the target level (0 or 1) using mosaic plots.
+  
+
+```{r}
+target_var = "TARGET_FLAG"
+df1 = df_viz$discrete
+df1 = data.frame(df1)
+descrete_vars = names(df1)
+descrete_preds = setdiff(descrete_vars,target_var)
+par(mfrow=c(2,2))
+for (i in descrete_preds){
+  mosaic(table(df1[,i],df1[,target_var],dnn = c(i,target_var)),
+         split_vertical = T,shade = T)
+ 
+}
+```
+
+From the inspection of the mosaic plots we can conclude that most of the discrete predictors carry information related to the level of the outcome variable, with the exception of `SEX`, and `RED_CAR`. Based on the distribution of the data, neither being male or female, nor having a red car plays a role in the probability of being in a car crash.
+  
+  
+**Summary of the findings**
+  
+1. The distributions of the continous predictors resemble a gamma distribution with some exceptions regarding high counts of zero values  
+2. There is some collinearity between multiple continous predictors  
+3. There are also weak correlations between most continous predictors and the continous response  
+4. Most continous predictors carry little information regarding the binary response  
+5. With the exception of `SEX`, and `RED_CAR`, the discrete predictors appear highly relevant for predicting the binary outcome 
+  
+
+### 2. DATA PREPROCESSING  
+  
+### 2.1. Data cleaning
+
+The variables encoded as strings in the input data representing dollar values, e.g.
+"$21,100" were converted to numeric variables.
+
+In addition, spaces in factor variables' levels were replaced by underscores in order to comply with the requirements of the models generating dummy variables from these factors.
+
+### 2.1. Missing data and near-zero variables
+
+As discussed above, several variables in the dataset have missing observations. However, none of the predictors show near-zero variance.
+
+Instead of removing all rows with incomplete observations, an imputation of missing data using the predictive mean matching approach implemented in the **mice** package is applied.    
+In addition, the continous values were also centered and scaled in several models that were built.
+
+
+```{r echo=F, message=F, warning=F, output='hide'}
+# Impute the columns with missing values
+# install.packages("mice")
+library(mice)
+df_missing_cols = df[,c("AGE","INCOME","YOJ","HOME_VAL","CAR_AGE")]
+df_imp_cols_tmp = mice(data = df_missing_cols, m = 1, method = "pmm", maxit = 50, seed = 500)
+df_imp_cols = complete(df_imp_cols_tmp)
+df_imp = bind_cols(df %>% select(-AGE, -INCOME, -YOJ, -HOME_VAL, -CAR_AGE),df_imp_cols)
+```
+
+
+
+### 3. BUILD MODELS
+
+In this step, several predictive models are built separately for the binary response, and for the continous response.
+In order to measure model performance and select the best one, 20% of the training data 
+are held out and used for out-of-sample testing of the models.
+In order to reduce overfitting, the parameters for each model are estimated using 5-fold cross-validation repeated 5 times using the functions of the **caret** package.
+
+### 3.1. BUILD MODELS FOR THE BINARY RESPONSE
+  
+In this step, several logistic regression models are be built to predict the `TARGET_FLAG` class assignment. 
+
+Regarding in-sample performance, the model accuracy will be compared to the baseline of 73.6% which would occur if the model assigned each observation to the most frequent class in the training data (when `TARGET_FLAG` equals 0).
+  
+#### 3.1.1. Full model  
+  
+The first model considered is the model with all of the predictors. While this model can be overfitting the data due to the issues highlighted in the data exploration step, it could be a good reference for further simpler models in terms of the accuracy (as the accuracy of a better model should not be significantly worse than that of the full model).
+
+```{r m1}
+set.seed(123) 
+# Imputing missing data on the binary dataset
+df_binary = df_imp %>% select(-TARGET_AMT)
+# Split into training and test
+df_index = createDataPartition(df_binary$TARGET_FLAG, p = .8, list = FALSE)
+df_train = df_binary[ df_index, ]
+df_test = df_binary[-df_index, ]
+# Set up the CV routine 
+fitControl = trainControl(## 5-fold CV
+                           method = "repeatedcv",
+                           number = 5,
+                           ## repeated 5 times
+                           repeats = 5)
+```
+
+```{r warning =F}
+# Train the full model
+library("e1071")
+m1 = train(TARGET_FLAG ~ ., data = df_train, 
+                 method = "glm",
+                 trControl = fitControl)
+```
+
+
+**Model summary**
+
+```{r}
+summary(m1$finalModel)
+```
+
+```{r}
+knitr::kable(m1$results)
+```
+
+```{r}
+varImp(m1$finalModel,scale = F)
+```
+
+  
+From the model summary we can see the following:  
+  
+1) The model accuracy on the training data is somewhat better than the baseline: approx. 78.5% vs. 73.6%. Given that this is a full model with a very high flexibility due to dummy variables generated for each factor level, we can exclude model bias as the reason. This means that the predictors probably do not carry enough information on the response for high-accuracy predictions.  
+2) The deviance residuals are not quite normally distributed around zero indicating residual structure in the data not captured by the model.  
+3) Based on the z-statistic of the parameters, the most important predictors are (ordered by desceding importance, sign in brackets means direction of the relationship): `URBANICITY: z_Highly Rural/ Rural`(-), `CAR_TYPE`(effect strength highest for the Sports Car type), `REVOKED: Yes`(+), `CAR_USE: Private`(-), `MVR_PTS`(+), and `TRAVTIME`(+).  
+4) The predictors related to income, education and parent status are also significant, but have lower effect on the response.  
+5) The continous predictors related to driver's and car age are not significant, just as the discrete factors gender and having a red car.  
+  
+**Interpretation of the regression coefficients**  
+  
+Multiple assumptions listed in the dataset description are confirmed by the data at hand. A car crash is less likely for a driver living in a rural area, driving an expensive car only for private purposes (not as a job), and driving not too often. If this person has not had their license revoked in the past 7 years, and is a manager living in an expensive house and is a parent, the chances for an accident are further decreased.  
+On the other hand, a more likely accident participant is a person who frequently drives their sports car or SUV, lives in a city, had their licence revoked / has a high number of MVR points and has already claimed accident insurance several times in the past. The chances are further increased if they have teenage children who can drive their car as well. 
+
+The diagnostic plots for the model can be generated using the R code provided in the appendix.
+
+```{r include=F, eval=F}
+plot(m1$finalModel)
+```
+
+
+#### 3.1.2. Reduced model 1 (manual variable selection and transformed predictors)
+  
+For the second model, the following changes are made:  
+
+- The predictors that were not significant in the full model are excluded:
+`AGE`, `YOJ`, `SEX`, `RED_CAR`, `CAR_AGE`
+- The remaining continuous predictors are centered and scaled
+  
+**Model summary**
+
+```{r m2}
+m2 = train(TARGET_FLAG ~. -AGE -YOJ -SEX -RED_CAR -CAR_AGE, data = df_train, 
+                 method = "glm", preProc = c("center", "scale"),
+                 trControl = fitControl)
+```
+
+```{r}
+summary(m2$finalModel)
+```
+
+```{r}
+m2$results
+```
+
+```{r}
+varImp(m2,scale = F)
+```
+  
+We can see that in this reduced model, all predictors are now significant, and the accuracy has remained the same, and the AIC has grown only marginally.
+
+The interpretation of the coefficients has stayed the same as in the full model.
+  
+#### 3.1.3. Reduced model 2 (LASSO Model)  
+  
+The third model is build using LASSO, a regularized regression approach from the **glmnet** package that that fits a generalized linear model via penalized maximum likelihood. As in the second model, the continuous predictors are centered and scaled.  
+The penalty parameter is chosen automatically using cross-validation.
+  
+**Model summary**  
+```{r m3, cache=T}
+library(methods)
+library(glmnet)
+m3 = train(TARGET_FLAG ~. , data = df_train, 
+                 method = "glmnet", standardize = T,family = "binomial",
+                 # setting for LASSO-only
+                 trControl = fitControl)
+m3_final = m3$finalModel
+```
+
+```{r}
+knitr::kable(m3$results[m3$results$alpha==1 & m3$results$lambda==m3$bestTune[,"lambda"],])
+```
+
+```{r}
+m3_coefs = data.frame(as.matrix(coef(m3_final,s = m3$bestTune$lambda)))
+names(m3_coefs) = "beta"
+m3_coefs$predictor = rownames(m3_coefs)
+as.tbl(m3_coefs) %>% arrange(desc(abs(beta)))
+```
+
+
+We can see that the LASSO model selection has resulted in setting the coefficients for the low-importance predictors to zero or nearly zero. In this way, the LASSO model does automated variable selection. The low-importance predictors are the similar to those identified in the models above: `RED_CAR`, `YOJ`, `CAR_AGE`, `AGE`; however, also the predictors that are significant in the other models have received a penalty: `AGE`, `INCOME`, `HOME_VAL`, `BLUEBOOK`.  
+The model accuracy is on par with the full model at 78.5%.
+
+The interpretation of the model coefficients for the most important variables remains the same as above. 
+ 
+ 
+### 3.2. Building Models for the continous response variable
+
+In this section, two multinomial models are built for the continous response variable provided in the dataset: `TARGET_AMT` - the value of the insurance claim in the case when there was an accident.
+  
+Analog to the previous section, the first model built is a full model with all the available predictors.
+The second model uses a reduced set of predictors, scaled and centered variables, and excludes outliers.
+  
+The performance of both models is compared on the same out-of-sample dataset and measured based on the adjusted R-squared and RMSE.  
+
+```{r}
+# the continous dataset
+df_cont = df_imp %>% select(-TARGET_FLAG)
+# Split into training and test
+df1_index = createDataPartition(df_cont$TARGET_AMT, p = .8, list = FALSE)
+df1_train = df_cont[ df1_index, ]
+df1_test = df_cont[-df1_index, ]
+```
+
+
+### 3.2.1 Continous Model 1 (full model)
+
+The first model built for continous data is a full model with non-transformed predictors.
+
+```{r}
+m1_cont = train(TARGET_AMT ~. , data = df1_train
+           , method = "lm", 
+           trControl = fitControl)
+```
+
+```{r}
+summary(m1_cont$finalModel)
+```
+
+```{r}
+knitr::kable(m1_cont$results)
+```
+
+```{r}
+par(mfrow=c(2,2))
+plot(m1_cont$finalModel)
+par(mfrow=c(1,1))
+```
+
+
+From the model summary we can see that while several predictors are highly significant, the errors are not nearly normal, and the Adjusted R-squared value is very low at 0.06.  
+The diagnostic plots show:  
+1) a very severe violation of normality in the residuals for the higher values of the response variable (beyond 2 standard deviations)  
+2) a number of high-impact residuals that are affecting the model
+  
+Overall, the fit is poor due to  
+1) low correlation between the individual predictors and the outcome
+2) the severe skew in the response variable    
+3) presence of extreme outliers
+  
+### 3.2.2 Continous Model 2 (reduced model)
+  
+The second continuous model tries to alleviate the identified problems by:
+1) excluding the outlier records  
+2) excluding the variables that are not correlated with the response    
+3) centering and scaling the remaining continous predictors  
+4) applying a log-transformation on the response 
+  
+
+```{r cache=T}
+df1_train_clean = df1_train[-c(6153,5661,6222),]
+# log(TARGET_AMT+1)
+m2_cont = train(log(TARGET_AMT+1) ~. -HOMEKIDS -EDUCATION -BLUEBOOK -RED_CAR -OLDCLAIM -AGE -YOJ -HOME_VAL
+                , data = df1_train_clean
+                , method = "lm", preProc = c("center", "scale"),
+                trControl = fitControl)
+```
+
+```{r}
+summary(m2_cont$finalModel)
+```
+
+
+```{r}
+knitr::kable(m2_cont$results)
+```
+
+```{r}
+par(mfrow=c(2,2))
+plot(m2_cont$finalModel)
+par(mfrow=c(1,1))
+```
+  
+From the model summary we can see that the log-transformation of the response has helped solve the problem with the distribution of the residuals. As a result, the Adjusted R-squared metric has grown to 0.22.
+However, there is still a very strange remaining pattern in the standardized residuals.
+  
+### 4. MODEL SELECTION
+  
+### 4.1. Model selection for the binary response model
+
+For the model selection step, the three models build in the previous section will be evaluated on the 20% out-of-sample data not used in the model building process. The predicted class is assigned at >50% probability.
+
+Then, the following classification performance metrics will be compared: (a) accuracy, (b) classification error rate, (c) precision, (d) sensitivity, (e) specificity, (f) F1 score, (g) AUC, and (h) confusion matrix. 
+The best performing model is the one with the highest F1 score and AUC values, as these metrics capture model sensitivity, specificity, and overall performance independent from the class cutoff threshold. 
+
+
+```{r}
+# Predict on out-of-sample data
+m1_pred = predict(m1, df_test)
+m2_pred = predict(m2, df_test)
+m3_pred = predict(m3, df_test)
+```
+
+The three confusion matrices are provided below.
+```{r}
+cm1 = confusionMatrix(data = m1_pred, reference = df_test$TARGET_FLAG,positive = "1",mode = "everything")
+cm2 = confusionMatrix(data = m2_pred, reference = df_test$TARGET_FLAG,positive = "1",mode = "everything")
+cm3 = confusionMatrix(data = m3_pred, reference = df_test$TARGET_FLAG,positive = "1",mode = "everything")
+```
+
+Confusion matrix: Full model (model 1)
+
+```{r}
+cm1$table
+```
+
+Confusion matrix: manually reduced model (model 2)
+
+```{r}
+cm2$table
+```
+
+Confusion matrix: stepwise selection model (model 3)
+
+```{r}
+cm3$table
+```
+
+Looking at table comparing classification performance metrics between the models provided below,
+we can see that the models are extremely similar in their performance. 
+Therefore in practical terms the model *m2* could still be considered as the final model, as it is easier to understand due to a lower number of predictors.
+
+```{r}
+models = c("m1", "m2", "m3")
+newdata = df_test
+response_var = "TARGET_FLAG"
+output = data.frame()
+for (i in models){
+  model_pred = predict(eval(parse(text=i)), newdata)
+  ref = df_test$TARGET_FLAG
+  cm = confusionMatrix(model_pred, reference = ref, positive = "1",mode = "everything")
+  
+  
+  model_metrics = data.frame(
+    row.names = i,
+    accuracy = cm$overall[1],
+    class_error_rate = (cm$table[2,1] + cm$table[1,2])/sum(cm$table),
+    precision = cm$byClass[5],
+    sensitivity = cm$byClass[1],
+    specificity = cm$byClass[2],
+    f1_score = cm$byClass[7],
+    auc = ModelMetrics::auc(ref,model_pred)
+    )
+  output = rbind(output, model_metrics)
+}
+knitr::kable(output)
+```
+
+**ROC Curves for the three models**
+  
+Classification accuracy between the models can be also compared using ROC curves. 
+
+```{r}
+library(pROC)
+roc_rose = plot(roc(as.numeric(ref),as.numeric(m1_pred)), print.auc = TRUE, col = "blue")
+roc_rose = plot(roc(as.numeric(ref),as.numeric(m2_pred)), print.auc = TRUE, 
+                 col = "green", print.auc.y = .4, add = TRUE)
+roc_rose = plot(roc(as.numeric(ref),as.numeric(m3_pred)), print.auc = TRUE, 
+                 col = "red", print.auc.y = .6, add = TRUE)
+```
+
+
+A comparison of the ROC curves shows that the models are indeed very similar in performance.
+
+**Predictions on the evaluation dataset**  
+  
+Predictions on the evaluation dataset are made using the model *m3*.
+
+```{r}
+df_eval = read_csv("insurance_evaluation_data.csv")
+# Preprocess the evaluation data
+df_eval = as.tbl(df_eval) %>% 
+  mutate_at(c("INCOME","HOME_VAL","BLUEBOOK","OLDCLAIM"),
+            dollars_to_numeric) %>% 
+  mutate_at(c("EDUCATION","JOB","CAR_TYPE","URBANICITY"),
+            space_to_underscore) %>% 
+  mutate_at(c("EDUCATION","JOB","CAR_TYPE","URBANICITY"),
+            as.factor) %>% 
+  mutate(TARGET_FLAG = as.factor(TARGET_FLAG))
+eval_predict = predict(m3,data.frame(df_eval))
+eval_predict = as.numeric(eval_predict)-1 # need this correction because of the factor levels in R
+write_csv(data.frame(eval_predict),"model_m3_eval_predictions.csv")
+```
+
+The output of the model on the evaluated data is available under the following URL:
+[model_m3_eval_predictions.csv](https://github.com/yathdeep/msds-data621/blob/main/model_m3_eval_predictions.csv)
+
+### 4.2. Model selection for the continous response model
+
+The performance of the continous models will be compared based on RMSE on the out-of sample data
+
+```{r}
+m1_cont_pred = predict(m1_cont, df1_test)
+m2_cont_pred = exp(predict(m2_cont, df1_test))-1
+```
+
+```{r}
+m1_cont_rmse = RMSE(pred = m1_cont_pred, obs = df1_test$TARGET_AMT,na.rm = T)
+m2_cont_rmse = RMSE(pred = m2_cont_pred, obs = df1_test$TARGET_AMT,na.rm = T)
+res = data.frame(model=c("model1","model2"),RMSE=c(m1_cont_rmse,m2_cont_rmse))
+knitr::kable(res)
+```
+
+The RMSE for the first (full) model is lower. From the charts below it is clear that the model two consistently produces very low values as compared to the true result.
+
+```{r}
+par(mfrow=c(1,2))
+plot(m1_cont_pred,df1_test$TARGET_AMT,main="model 1",xlab = "fitted value", ylab="actual value")
+plot(m2_cont_pred,df1_test$TARGET_AMT,main="model 2",xlab = "fitted value", ylab="actual value")
+par(mfrow=c(1,1))
+```
+  
+So the initial full model will be selected for now to produce predictions on the evaluation data. However, further tuning could provide better precision of the predictions.
+
+**Predictions on the evaluation dataset**  
+  
+Predictions on the evaluation dataset are made using the model *m1_cont*.
+
+```{r}
+eval1_predict = predict(m1_cont,data.frame(df_eval))
+write_csv(data.frame(eval1_predict),"model_m1_cont_eval_predictions.csv")
+```
+
+The output of the model on the evaluated data is available under the following URL:
+[model_m1_cont_eval_predictions.csv](https://github.com/yathdeep/msds-data621/blob/main/model_m1_cont_eval_predictions.csv)
+
+### Appendix
+
+The full R code for the analysis in Rmd format is available under the following URL:
+[Data621_Assignment4.Rmd](https://github.com/yathdeep/msds-data621/blob/main/Data621_Assignment4.Rmd)
+
+
+### Reference
+  
+https://cran.r-project.org/web/packages/DataExplorer/vignettes/dataexplorer-intro.html 
+https://www.statmethods.net/advgraphs/trellis.html
+http://topepo.github.io/caret/visualizations.html
+https://www.analyticsvidhya.com/blog/2016/03/tutorial-powerful-packages-imputing-missing-values/ 
+https://web.stanford.edu/~hastie/glmnet/glmnet_alpha.html#lin
+https://stackoverflow.com/questions/35247522/error-in-cross-validation-in-glmnet-package-r-for-binomial-target-variable 
